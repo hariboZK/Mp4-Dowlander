@@ -7,11 +7,50 @@ Supported Platforms: YouTube, Twitter/X, Instagram (Reels, Posts, Stories), TikT
 
 import os
 import sys
+import shutil
 from pathlib import Path
 
-# Download directory
-DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
+# Ensure UTF-8 output encoding across Windows terminals
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# Base & Download directories
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOAD_DIR = BASE_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+def get_ffmpeg_path():
+    """
+    Locates ffmpeg executable in the tool directory, system PATH,
+    or default winget install locations.
+    """
+    # 1. Check local tool folder first
+    local_ffmpeg = BASE_DIR / "ffmpeg.exe"
+    if local_ffmpeg.exists():
+        return str(local_ffmpeg)
+
+    # 2. Check system PATH
+    in_path = shutil.which("ffmpeg")
+    if in_path:
+        return in_path
+
+    # 3. Check Windows WinGet default directories
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        winget_links = Path(local_app_data) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+        if winget_links.exists():
+            return str(winget_links)
+
+        winget_pkg = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        if winget_pkg.exists():
+            for p in winget_pkg.glob("**/ffmpeg.exe"):
+                return str(p)
+
+    return None
 
 def check_dependencies():
     """Checks if the required dependencies are installed."""
@@ -31,7 +70,7 @@ def check_dependencies():
         for pkg in missing:
             print(f"  - {pkg}")
         print("\nPlease install the required packages using the following command:")
-        print(f"pip install -r requirements.txt\n")
+        print("pip install -r requirements.txt\n")
         return False
     return True
 
@@ -43,28 +82,59 @@ def download_with_ytdlp(url: str, extract_audio: bool = False, browser_cookies: 
 
     print(f"\n[*] Fetching and downloading media: {url}")
 
+    ffmpeg_path = get_ffmpeg_path()
+    if ffmpeg_path:
+        ffmpeg_dir = str(Path(ffmpeg_path).parent)
+        if ffmpeg_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+
     outtmpl = str(DOWNLOAD_DIR / "%(title)s [%(id)s].%(ext)s")
 
     ydl_opts = {
         'outtmpl': outtmpl,
         'quiet': False,
         'no_warnings': False,
+        'nocheckcertificate': True,
+        'retries': 5,
+        'fragment_retries': 5,
+        'windowsfilenames': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web', 'mweb', 'ios', 'android']
+            }
+        },
     }
 
+    if ffmpeg_path:
+        ydl_opts['ffmpeg_location'] = ffmpeg_path
+
     if extract_audio:
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
+        if ffmpeg_path:
+            ydl_opts.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+            })
+        else:
+            print("[!] Warning: FFmpeg not detected. Downloading original audio format instead of MP3...")
+            ydl_opts.update({
+                'format': 'bestaudio/best',
+            })
     else:
-        # Best mp4 video and audio merged, or best standalone file
-        ydl_opts.update({
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        })
+        if ffmpeg_path:
+            # Best mp4 video and audio merged
+            ydl_opts.update({
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+                'merge_output_format': 'mp4',
+            })
+        else:
+            print("[!] Note: FFmpeg not detected. Downloading best pre-merged stream...")
+            ydl_opts.update({
+                'format': 'b[ext=mp4]/best[ext=mp4]/best',
+            })
 
     # If browser cookies are provided (for Instagram stories, private content, etc.)
     if browser_cookies:
@@ -138,16 +208,20 @@ def main():
     if not check_dependencies():
         sys.exit(1)
 
+    ffmpeg_path = get_ffmpeg_path()
+    ffmpeg_status = f"[OK] Ready ({Path(ffmpeg_path).name})" if ffmpeg_path else "[!] Not found (HD merge / MP3 disabled)"
+
     while True:
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 54)
         print("     MEDIA DOWNLOADER (YouTube, Twitter/X, Instagram)")
-        print("=" * 50)
-        print("1) Download Video (YouTube, Twitter/X, Instagram Reels/Posts, TikTok, etc.)")
+        print(f"     FFmpeg Engine: {ffmpeg_status}")
+        print("=" * 54)
+        print("1) Download Video (YouTube, Twitter/X, Reels/Posts, TikTok, etc.)")
         print("2) Download Audio Only - MP3 (YouTube, etc.)")
         print("3) Download Instagram Story")
         print("4) Open Downloads Folder")
         print("0) Exit")
-        print("=" * 50)
+        print("=" * 54)
 
         choice = input("Select an option: ").strip()
 
